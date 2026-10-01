@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+MacMonitor.app
+*.xcodeproj
+xcuserdata/
