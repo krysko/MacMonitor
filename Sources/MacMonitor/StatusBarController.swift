@@ -55,7 +55,7 @@ final class StatusBarController: NSObject {
 
         menu.delegate = self
         statusItem.menu = menu
-        statusItem.button?.attributedTitle = barTitle(cpu: nil, memory: nil, temperature: nil)
+        present(barTitle(cpu: nil, memory: nil, temperature: nil))
 
         sampler.onUpdate = { [weak self] metrics in
             self?.apply(metrics)
@@ -94,11 +94,11 @@ final class StatusBarController: NSObject {
         let signature = Self.signature(for: metrics)
         if signature != appliedSignature {
             appliedSignature = signature
-            statusItem.button?.attributedTitle = barTitle(
+            present(barTitle(
                 cpu: metrics.cpuPercent,
                 memory: metrics.memory?.percent,
                 temperature: metrics.cpuTemperatureC
-            )
+            ))
         }
         if menuOpen {
             updateMenu(metrics)
@@ -141,6 +141,13 @@ final class StatusBarController: NSObject {
             color = 0
         }
         return "\(cpu)|\(memory)|\(temperature)|\(color)"
+    }
+
+    /// `attributedTitle` 不会自己撑开状态项。宽度不够时，文字会画到相邻图标上。
+    private func present(_ title: NSAttributedString) {
+        guard let button = statusItem.button else { return }
+        button.attributedTitle = title
+        statusItem.length = ceil(title.size().width) + 18
     }
 
     private func barTitle(cpu: Double?, memory: Double?, temperature: Double?) -> NSAttributedString {
