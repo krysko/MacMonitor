@@ -23,8 +23,9 @@ final class StatusBarController: NSObject {
     private var appliedSignature: String?
     private var compact = false
     private var displayedTitle: NSAttributedString?
-    /// 上次展开后仍然放不下时的空隙。同一宽度不再反复尝试，避免文字和图标来回闪。
-    private var blockedGap: CGFloat?
+    private var modeChangedAt = Date.distantPast
+    /// 读数可以压住旁边图标的宽度。小于这点仍显示文字，再窄才收成图标。
+    private static let overlapAllowance: CGFloat = 48
     private lazy var compactImage: NSImage = {
         let base = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: "性能")
             ?? NSImage(systemSymbolName: "speedometer", accessibilityDescription: "性能")
@@ -262,7 +263,9 @@ final class StatusBarController: NSObject {
         button.contentTintColor = nil
         button.font = font
         button.title = title.string
-        statusItem.length = NSStatusItem.variableLength
+        if statusItem.length != NSStatusItem.variableLength {
+            statusItem.length = NSStatusItem.variableLength
+        }
         button.attributedTitle = title
     }
 
@@ -286,28 +289,35 @@ final class StatusBarController: NSObject {
         guard frame.width > 1, frame.height > 1 else { return }
 
         let needed = ceil(title.size().width) + 22
-        let gap = menuBarFreeWidth(in: right)
-        let underNotch = frame.minX < right.minX - 1
-        let neighborMinX = gap.map { right.minX + $0 }
-        let overlapsNeighbor = neighborMinX.map { frame.maxX > $0 + 1 } ?? false
-
-        if !compact && (underNotch || overlapsNeighbor) {
-            blockedGap = gap
-            compact = true
-            present(title)
-            return
-        }
-
-        if compact, let gap, gap >= needed, blockedGap.map({ gap >= $0 + 12 }) ?? true {
-            blockedGap = nil
-            compact = false
+        let layout = menuBarLayout(in: right)
+        let neighborMinX = layout.neighborMinX
+        // 用其他图标占用的总宽度，而不是它们被挤到的位置。否则展开后空隙变小，又会立刻收起。
+        let room = max(0, right.width - layout.occupied) + Self.overlapAllowance
+        // 已经展开时多留一截，避免空隙在临界值附近时文字和图标来回切换。
+        let wantsCompact = compact ? room < needed : room + 32 < needed
+        if wantsCompact != compact, Date().timeIntervalSince(modeChangedAt) > 2 {
+            modeChangedAt = Date()
+            compact = wantsCompact
             present(title)
             return
         }
 
         if compact {
             placeIconInGap(frame: frame, safe: right, neighborMinX: neighborMinX)
+        } else if frame.minX < right.minX - 1 {
+            nudgeOutOfNotch(frame: frame, safe: right)
         }
+    }
+
+    /// 只有整段落进刘海、完全看不见时才挪一次。不要每次刷新都改位置。
+    private func nudgeOutOfNotch(frame: NSRect, safe: NSRect) {
+        guard let window = statusItem.button?.window else { return }
+        let x = safe.minX + 2
+        guard abs(x - frame.minX) >= 1.5 else { return }
+        window.setFrame(
+            NSRect(x: x, y: frame.origin.y, width: frame.width, height: frame.height),
+            display: true
+        )
     }
 
     /// 小图标仍然压住旁边的图标或刘海时，把它放进刘海右侧的空隙里。
@@ -331,13 +341,14 @@ final class StatusBarController: NSObject {
         )
     }
 
-    /// 刘海右侧到下一个可见菜单栏窗口的空隙。看不到旁边的图标时返回 nil。
-    private func menuBarFreeWidth(in right: NSRect) -> CGFloat? {
+    /// 刘海右侧其他菜单栏窗口的左边缘，以及它们实际占掉的宽度。
+    private func menuBarLayout(in right: NSRect) -> (neighborMinX: CGFloat?, occupied: CGFloat) {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+            return (nil, 0)
         }
         let ourPID = ProcessInfo.processInfo.processIdentifier
         let ourWindow = statusItem.button?.window?.windowNumber ?? 0
+        var spans: [(CGFloat, CGFloat)] = []
         var neighbor: CGFloat?
         for entry in info {
             let number = entry[kCGWindowNumber as String] as? Int ?? -1
@@ -348,11 +359,26 @@ final class StatusBarController: NSObject {
             let y = Self.cgFloat(bounds["Y"])
             let width = Self.cgFloat(bounds["Width"])
             let height = Self.cgFloat(bounds["Height"])
-            guard y >= 0, y < 48, height > 0, height < 80, width > 8 else { continue }
-            guard x >= right.minX - 2, x < right.maxX else { continue }
-            neighbor = min(neighbor ?? right.maxX, x)
+            guard y >= 0, y < 48, height > 0, height < 80, width > 8, width < right.width * 0.8 else { continue }
+            let minX = max(x, right.minX)
+            let maxX = min(x + width, right.maxX)
+            guard maxX - minX > 4 else { continue }
+            spans.append((minX, maxX))
+            if x >= right.minX - 2, x < right.maxX {
+                neighbor = min(neighbor ?? right.maxX, x)
+            }
         }
-        return neighbor.map { max(0, $0 - right.minX) }
+        spans.sort { $0.0 < $1.0 }
+        var occupied: CGFloat = 0
+        var end: CGFloat = right.minX
+        for span in spans {
+            let start = max(span.0, end)
+            if span.1 > start {
+                occupied += span.1 - start
+                end = span.1
+            }
+        }
+        return (neighbor, occupied)
     }
 
     private static func cgFloat(_ value: Any?) -> CGFloat {
