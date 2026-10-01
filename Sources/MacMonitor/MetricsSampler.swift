@@ -4,6 +4,7 @@ struct SystemMetrics {
     var cpuPercent: Double?
     var memory: MemorySample?
     var cpuTemperatureC: Double?
+    var apps: [AppUsage]
 }
 
 final class MetricsSampler {
@@ -12,6 +13,7 @@ final class MetricsSampler {
     private let cpu = CPUSampler()
     private let memory = MemorySampler()
     private let temperature = TemperatureSampler()
+    private let apps = AppUsageSampler()
     private var timer: Timer?
     private var interval: TimeInterval
 
@@ -50,7 +52,8 @@ final class MetricsSampler {
             SystemMetrics(
                 cpuPercent: cpu.sample(),
                 memory: memory.sample(),
-                cpuTemperatureC: temperature.sample()
+                cpuTemperatureC: temperature.sample(),
+                apps: apps.sample()
             )
         }
         onUpdate?(metrics)

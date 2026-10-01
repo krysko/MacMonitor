@@ -3,6 +3,8 @@ import AppKit
 final class StatusBarController: NSObject {
     static let intervals: [TimeInterval] = [0.5, 1, 2, 5, 10]
     private static let defaultsKey = "sampleInterval"
+    private static let sortDefaultsKey = "appSort"
+    private static let appRowCount = 10
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let cpuItem = NSMenuItem(title: "CPU：--", action: nil, keyEquivalent: "")
@@ -10,11 +12,27 @@ final class StatusBarController: NSObject {
     private let temperatureItem = NSMenuItem(title: "温度：--", action: nil, keyEquivalent: "")
     private let intervalMenuItem = NSMenuItem(title: "刷新频率", action: nil, keyEquivalent: "")
     private var intervalItems: [NSMenuItem] = []
+    private var appItems: [NSMenuItem] = []
+    private let sortByCPUItem = NSMenuItem(title: "按 CPU", action: #selector(selectAppSort(_:)), keyEquivalent: "")
+    private let sortByMemoryItem = NSMenuItem(title: "按内存", action: #selector(selectAppSort(_:)), keyEquivalent: "")
+    private var sortByMemory = false
     private let sampler: MetricsSampler
     private let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
     private var menuOpen = false
     private var latest: SystemMetrics?
     private var appliedSignature: String?
+    private var compact = false
+    private var displayedTitle: NSAttributedString?
+    /// 上次因为放不下而收起时，刘海右侧到下一个可见图标的空隙。空隙没变宽就不再展开，避免来回闪。
+    private var blockedGap: CGFloat?
+    private lazy var compactImage: NSImage = {
+        let base = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: "性能")
+            ?? NSImage(systemSymbolName: "speedometer", accessibilityDescription: "性能")
+            ?? NSImage()
+        let configured = base.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)) ?? base
+        configured.isTemplate = true
+        return configured
+    }()
 
     override init() {
         let interval = Self.savedInterval()
@@ -29,6 +47,28 @@ final class StatusBarController: NSObject {
         menu.addItem(cpuItem)
         menu.addItem(memoryItem)
         menu.addItem(temperatureItem)
+        menu.addItem(.separator())
+
+        let appHeader = NSMenuItem(title: "应用占用", action: nil, keyEquivalent: "")
+        appHeader.isEnabled = false
+        menu.addItem(appHeader)
+        for _ in 0..<Self.appRowCount {
+            let item = NSMenuItem(title: "正在统计…", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.isHidden = true
+            menu.addItem(item)
+            appItems.append(item)
+        }
+        sortByMemory = UserDefaults.standard.string(forKey: Self.sortDefaultsKey) == "memory"
+        let sortMenu = NSMenu()
+        for item in [sortByCPUItem, sortByMemoryItem] {
+            item.target = self
+            sortMenu.addItem(item)
+        }
+        updateSortChecks()
+        let sortItem = NSMenuItem(title: "排序", action: nil, keyEquivalent: "")
+        sortItem.submenu = sortMenu
+        menu.addItem(sortItem)
         menu.addItem(.separator())
 
         let intervalMenu = NSMenu()
@@ -84,6 +124,20 @@ final class StatusBarController: NSObject {
         sampler.setInterval(matched)
     }
 
+    @objc private func selectAppSort(_ sender: NSMenuItem) {
+        sortByMemory = sender === sortByMemoryItem
+        UserDefaults.standard.set(sortByMemory ? "memory" : "cpu", forKey: Self.sortDefaultsKey)
+        updateSortChecks()
+        if let latest {
+            updateAppItems(latest.apps)
+        }
+    }
+
+    private func updateSortChecks() {
+        sortByCPUItem.state = sortByMemory ? .off : .on
+        sortByMemoryItem.state = sortByMemory ? .on : .off
+    }
+
     private static func intervalTitle(_ interval: TimeInterval) -> String {
         if interval < 1 {
             return String(format: "%.1f 秒", interval)
@@ -101,6 +155,8 @@ final class StatusBarController: NSObject {
                 memory: metrics.memory?.percent,
                 temperature: metrics.cpuTemperatureC
             ))
+        } else {
+            refreshCompactMode()
         }
         if menuOpen {
             updateMenu(metrics)
@@ -124,6 +180,45 @@ final class StatusBarController: NSObject {
         } else {
             setTitle(temperatureItem, "温度：--")
         }
+        updateAppItems(metrics.apps)
+    }
+
+    private func updateAppItems(_ apps: [AppUsage]) {
+        let ranked = apps.sorted { lhs, rhs in
+            if sortByMemory {
+                return lhs.memoryBytes == rhs.memoryBytes
+                    ? lhs.cpuPercent > rhs.cpuPercent
+                    : lhs.memoryBytes > rhs.memoryBytes
+            }
+            return lhs.cpuPercent == rhs.cpuPercent
+                ? lhs.memoryBytes > rhs.memoryBytes
+                : lhs.cpuPercent > rhs.cpuPercent
+        }
+        let top = Array(ranked.prefix(Self.appRowCount))
+        for (index, item) in appItems.enumerated() {
+            if index < top.count {
+                setTitle(item, Self.appTitle(top[index]))
+                item.isHidden = false
+            } else if index == 0, top.isEmpty {
+                setTitle(item, "正在统计…")
+                item.isHidden = false
+            } else {
+                item.isHidden = true
+            }
+        }
+    }
+
+    private static func appTitle(_ app: AppUsage) -> String {
+        let name = app.name.count > 22 ? String(app.name.prefix(21)) + "…" : app.name
+        return "\(name)    \(percentText(app.cpuPercent, decimals: 1))    \(memoryText(app.memoryBytes))"
+    }
+
+    private static func memoryText(_ bytes: UInt64) -> String {
+        let megabytes = Double(bytes) / 1_048_576
+        if megabytes < 1024 {
+            return String(format: "%.0f MB", megabytes)
+        }
+        return String(format: "%.1f GB", megabytes / 1024)
     }
 
     private func setTitle(_ item: NSMenuItem, _ title: String) {
@@ -145,37 +240,133 @@ final class StatusBarController: NSObject {
         return "\(cpu)|\(memory)|\(temperature)|\(color)"
     }
 
-    /// 菜单栏文字太宽时，系统会把状态项塞进刘海，看起来像右上角没有图标。
-    /// 文字缩短后，如果仍落在刘海里，就挪到刘海右侧的可见区域。
+    /// 菜单栏右侧放不下整行读数时，收成一个小图标。点开菜单仍能看到全部内容。
     private func present(_ title: NSAttributedString) {
+        displayedTitle = title
         guard let button = statusItem.button else { return }
-        button.image = nil
-        button.font = font
-        button.title = title.string
-        statusItem.length = NSStatusItem.variableLength
         statusItem.isVisible = true
-        button.attributedTitle = title
-        moveOutOfNotch()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.moveOutOfNotch()
+        button.toolTip = title.string
+        if compact {
+            showCompactIcon(on: button, temperature: latest?.cpuTemperatureC)
+        } else {
+            showFullTitle(title, on: button)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.refreshCompactMode()
         }
     }
 
-    private func moveOutOfNotch() {
-        guard let window = statusItem.button?.window,
+    private func showFullTitle(_ title: NSAttributedString, on button: NSStatusBarButton) {
+        button.image = nil
+        button.imagePosition = .noImage
+        button.contentTintColor = nil
+        button.font = font
+        button.title = title.string
+        statusItem.length = NSStatusItem.variableLength
+        button.attributedTitle = title
+    }
+
+    private func showCompactIcon(on button: NSStatusBarButton, temperature: Double?) {
+        button.attributedTitle = NSAttributedString(string: "")
+        button.title = ""
+        button.image = compactImage
+        button.imagePosition = .imageOnly
+        button.contentTintColor = Self.temperatureTint(temperature)
+        if statusItem.length != NSStatusItem.squareLength {
+            statusItem.length = NSStatusItem.squareLength
+        }
+    }
+
+    private func refreshCompactMode() {
+        guard let title = displayedTitle,
+              let window = statusItem.button?.window,
               let right = window.screen?.auxiliaryTopRightArea
         else { return }
         let frame = window.frame
         guard frame.width > 1, frame.height > 1 else { return }
-        guard frame.minX < right.minX else { return }
-        let width = min(frame.width, right.width)
-        let shifted = NSRect(
-            x: right.minX + 4,
-            y: frame.origin.y,
-            width: width,
-            height: frame.height
+
+        let needed = ceil(title.size().width) + 22
+        let gap = menuBarFreeWidth(in: right)
+        let underNotch = frame.minX < right.minX - 1
+        let neighborMinX = gap.map { right.minX + $0 }
+        let overlapsNeighbor = neighborMinX.map { frame.maxX > $0 + 1 } ?? false
+
+        if !compact && (underNotch || overlapsNeighbor) {
+            blockedGap = gap
+            compact = true
+            present(title)
+            return
+        }
+
+        if compact, let gap, gap >= needed + 24, blockedGap.map({ gap - $0 >= 24 }) ?? true {
+            blockedGap = nil
+            compact = false
+            present(title)
+            return
+        }
+
+        if compact {
+            placeIconInGap(frame: frame, safe: right, neighborMinX: neighborMinX)
+        }
+    }
+
+    /// 小图标仍然压住旁边的图标或刘海时，把它放进刘海右侧的空隙里。
+    private func placeIconInGap(frame: NSRect, safe: NSRect, neighborMinX: CGFloat?) {
+        guard let window = statusItem.button?.window else { return }
+        let width = frame.width
+        var x = frame.minX
+        if x < safe.minX - 1 {
+            x = safe.minX + 2
+        }
+        if let neighborMinX, x + width > neighborMinX - 2 {
+            x = neighborMinX - width - 2
+        }
+        if x < safe.minX {
+            x = safe.minX + 2
+        }
+        guard abs(x - frame.minX) >= 1.5 else { return }
+        window.setFrame(
+            NSRect(x: x, y: frame.origin.y, width: width, height: frame.height),
+            display: true
         )
-        window.setFrame(shifted, display: true)
+    }
+
+    /// 刘海右侧到下一个可见菜单栏窗口的空隙。看不到旁边的图标时返回 nil。
+    private func menuBarFreeWidth(in right: NSRect) -> CGFloat? {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        let ourWindow = statusItem.button?.window?.windowNumber ?? 0
+        var neighbor: CGFloat?
+        for entry in info {
+            let number = entry[kCGWindowNumber as String] as? Int ?? -1
+            if number == ourWindow { continue }
+            if Self.cgFloat(entry[kCGWindowOwnerPID as String]) == CGFloat(ourPID) { continue }
+            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
+            let x = Self.cgFloat(bounds["X"])
+            let y = Self.cgFloat(bounds["Y"])
+            let width = Self.cgFloat(bounds["Width"])
+            let height = Self.cgFloat(bounds["Height"])
+            guard y >= 0, y < 48, height > 0, height < 80, width > 8 else { continue }
+            guard x >= right.minX - 2, x < right.maxX else { continue }
+            neighbor = min(neighbor ?? right.maxX, x)
+        }
+        return neighbor.map { max(0, $0 - right.minX) }
+    }
+
+    private static func cgFloat(_ value: Any?) -> CGFloat {
+        if let number = value as? CGFloat { return number }
+        if let number = value as? Double { return CGFloat(number) }
+        if let number = value as? Int { return CGFloat(number) }
+        return 0
+    }
+
+    private static func temperatureTint(_ celsius: Double?) -> NSColor? {
+        guard let celsius else { return nil }
+        if celsius > 80 { return .systemRed }
+        if celsius >= 60 { return .systemOrange }
+        return nil
     }
 
     private func barTitle(cpu: Double?, memory: Double?, temperature: Double?) -> NSAttributedString {

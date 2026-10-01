@@ -48,6 +48,19 @@ enum MacMonitorMain {
             }
             let tempText = celsius.map { String(format: "%.1f", $0) } ?? "nil"
             print("sample\(index) cpu=\(cpuText) memory=\(memoryText) temp=\(tempText)")
+            if index == 2 {
+                let started = Date()
+                let apps = AppUsageSampler()
+                _ = apps.sample()
+                Thread.sleep(forTimeInterval: 0.4)
+                let ranked = apps.sample().sorted { $0.cpuPercent > $1.cpuPercent }
+                let elapsed = Date().timeIntervalSince(started) * 1000
+                print(String(format: "apps sample %.1f ms count=%d", elapsed, ranked.count))
+                for app in ranked.prefix(8) where app.cpuPercent >= 0.5 || app.memoryBytes > 200_000_000 {
+                    let megabytes = Double(app.memoryBytes) / 1_048_576
+                    print("  \(app.name) cpu=\(String(format: "%.1f", app.cpuPercent)) mem=\(String(format: "%.0f", megabytes))MB")
+                }
+            }
             if index == 2, celsius == nil {
                 let sensors = temperature.readSensors()
                 if sensors.isEmpty {
