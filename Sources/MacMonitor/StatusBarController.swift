@@ -11,7 +11,7 @@ final class StatusBarController: NSObject {
     private let intervalMenuItem = NSMenuItem(title: "刷新频率", action: nil, keyEquivalent: "")
     private var intervalItems: [NSMenuItem] = []
     private let sampler: MetricsSampler
-    private let font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+    private let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
     private var menuOpen = false
     private var latest: SystemMetrics?
     private var appliedSignature: String?
@@ -55,6 +55,8 @@ final class StatusBarController: NSObject {
 
         menu.delegate = self
         statusItem.menu = menu
+        statusItem.isVisible = true
+        statusItem.length = NSStatusItem.variableLength
         present(barTitle(cpu: nil, memory: nil, temperature: nil))
 
         sampler.onUpdate = { [weak self] metrics in
@@ -143,11 +145,37 @@ final class StatusBarController: NSObject {
         return "\(cpu)|\(memory)|\(temperature)|\(color)"
     }
 
-    /// `attributedTitle` 不会自己撑开状态项。宽度不够时，文字会画到相邻图标上。
+    /// 菜单栏文字太宽时，系统会把状态项塞进刘海，看起来像右上角没有图标。
+    /// 文字缩短后，如果仍落在刘海里，就挪到刘海右侧的可见区域。
     private func present(_ title: NSAttributedString) {
         guard let button = statusItem.button else { return }
+        button.image = nil
+        button.font = font
+        button.title = title.string
+        statusItem.length = NSStatusItem.variableLength
+        statusItem.isVisible = true
         button.attributedTitle = title
-        statusItem.length = ceil(title.size().width) + 18
+        moveOutOfNotch()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.moveOutOfNotch()
+        }
+    }
+
+    private func moveOutOfNotch() {
+        guard let window = statusItem.button?.window,
+              let right = window.screen?.auxiliaryTopRightArea
+        else { return }
+        let frame = window.frame
+        guard frame.width > 1, frame.height > 1 else { return }
+        guard frame.minX < right.minX else { return }
+        let width = min(frame.width, right.width)
+        let shifted = NSRect(
+            x: right.minX + 4,
+            y: frame.origin.y,
+            width: width,
+            height: frame.height
+        )
+        window.setFrame(shifted, display: true)
     }
 
     private func barTitle(cpu: Double?, memory: Double?, temperature: Double?) -> NSAttributedString {
@@ -156,7 +184,7 @@ final class StatusBarController: NSObject {
             .font: font,
             .foregroundColor: NSColor.labelColor,
         ]
-        let summary = "CPU \(Self.percentText(cpu, decimals: 0))  内存 \(Self.percentText(memory, decimals: 0))  "
+        let summary = "\(Self.percentText(cpu, decimals: 0)) \(Self.percentText(memory, decimals: 0)) "
         text.append(NSAttributedString(string: summary, attributes: base))
 
         var temperatureAttributes = base
