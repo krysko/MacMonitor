@@ -23,7 +23,7 @@ final class StatusBarController: NSObject {
     private var appliedSignature: String?
     private var compact = false
     private var displayedTitle: NSAttributedString?
-    /// 上次因为放不下而收起时，刘海右侧到下一个可见图标的空隙。空隙没变宽就不再展开，避免来回闪。
+    /// 上次展开后仍然放不下时的空隙。同一宽度不再反复尝试，避免文字和图标来回闪。
     private var blockedGap: CGFloat?
     private lazy var compactImage: NSImage = {
         let base = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: "性能")
@@ -298,7 +298,7 @@ final class StatusBarController: NSObject {
             return
         }
 
-        if compact, let gap, gap >= needed + 24, blockedGap.map({ gap - $0 >= 24 }) ?? true {
+        if compact, let gap, gap >= needed, blockedGap.map({ gap >= $0 + 12 }) ?? true {
             blockedGap = nil
             compact = false
             present(title)
